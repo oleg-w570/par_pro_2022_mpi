@@ -3,11 +3,14 @@
 #define MODULES_TASK_3_ZORIN_O_MOORE_ALG_MOORE_ALG_H_
 
 #include <vector>
-#include <deque>
 
-#define INF 1000000
-#define EXIT_PROCESS -1
+#define INF 999
+using Vector = std::vector<int>;
+using Matrix = std::vector<Vector>;
 
-int moore_algorithm(const std::vector<std::vector<int>> &adjacency_matrix, int start, int end, int size);
+Vector expandVector(const Vector& V, int shift);
+Matrix expandMatrix(const Matrix& M, int shift);
+Vector MooreAlgSequential(const Matrix& weight_matrix, int start);
+Vector MooreAlgParallel(const Matrix& weight_matrix, int start);
 
 #endif  // MODULES_TASK_3_ZORIN_O_MOORE_ALG_MOORE_ALG_H_

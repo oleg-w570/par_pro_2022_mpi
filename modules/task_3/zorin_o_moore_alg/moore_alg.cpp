@@ -1,104 +1,150 @@
 // Copyright 2022 Zorin Oleg
 #include "../../modules/task_3/zorin_o_moore_alg/moore_alg.h"
+
 #include <mpi.h>
+
 #include <deque>
+#include <iostream>
+#include <string>
 
-std::vector<int> update(std::vector<int> *dist, const int size, const std::vector<int> &range, const int d) {
-    std::vector<int> update;
+Vector expandVector(const Vector& V, int shift) {
+  Vector res = V;
+  res.insert(res.end(), shift, INF);
+  return res;
+}
+
+Matrix expandMatrix(const Matrix& M, int shift) {
+  Matrix res = M;
+
+  for (Vector& row : res) {
+    row = expandVector(row, shift);
+  }
+  res.insert(res.end(), shift, Vector(M.size() + shift, INF));
+
+  return res;
+}
+
+Vector MooreAlgSequential(const Matrix& weight_matrix, int start) {
+  int size = weight_matrix.size();
+  std::deque<int> Q;
+  Q.push_back(start);
+  Vector d(size, INF);
+  d[start] = 0;
+  Vector was(size);
+
+  while (!Q.empty()) {
+    int curr = Q.front();
+    Q.pop_front();
+    int weight_curr = d[curr];
+    const Vector& curr_weight_row = weight_matrix[curr];
     for (int i = 0; i < size; i++) {
-        if (d + range[i] < dist->at(i) && range[i] != INF) {
-            dist->at(i) = d + range[i];
-            update.push_back(i);
+      if (curr_weight_row[i] < INF) {
+        int tmp = d[i];
+        d[i] = std::min(tmp, weight_curr + curr_weight_row[i]);
+        if (d[i] < tmp) {
+          for (auto it = Q.begin(); it != Q.end(); it++) {
+            if (*it == i) {
+              Q.erase(it);
+              was[i] = 1;
+              break;
+            }
+          }
+          if (was[i]) {
+            Q.push_front(i);
+          } else {
+            Q.push_back(i);
+          }
         }
+      }
     }
-    return update;
+  }
+
+  return d;
 }
 
-void side_process_work(int prank) {
-    while (true) {
-        int size;
-        MPI_Status status;
-        MPI_Recv(&size, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, &status);
-        if (size == EXIT_PROCESS) return;
-        std::vector<int> dist(size);
-        MPI_Recv(dist.data(), size, MPI_INT, 0, 0, MPI_COMM_WORLD, &status);
-        std::vector<int> range(size);
-        MPI_Recv(range.data(), size, MPI_INT, 0, 0, MPI_COMM_WORLD, &status);
-        int d;
-        MPI_Recv(&d, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, &status);
-        std::vector<int> updated = update(&dist, size, range, d);
-        int up_size = updated.size();
-        MPI_Send(&up_size, 1, MPI_INT, 0, 0, MPI_COMM_WORLD);
-        if (up_size != 0)
-            MPI_Send(updated.data(), up_size, MPI_INT, 0, 0, MPI_COMM_WORLD);
-        MPI_Send(dist.data(), size, MPI_INT, 0, 0, MPI_COMM_WORLD);
-    }
-}
+Vector MooreAlgParallel(const Matrix& weight_matrix, int start) {
+  int prank, psize;
+  MPI_Comm_size(MPI_COMM_WORLD, &psize);
+  MPI_Comm_rank(MPI_COMM_WORLD, &prank);
 
-int moore_algorithm(const std::vector<std::vector<int>> &adjacency_matrix, int start, int end, int size) {
-    int prank, pcount;
-    MPI_Comm_rank(MPI_COMM_WORLD, &prank);
-    MPI_Comm_size(MPI_COMM_WORLD, &pcount);
-    if (prank != 0) {
-        side_process_work(prank);
-        return 0;
-    }
-    std::deque<int> q;
-    q.push_back(start);
+  Matrix M = weight_matrix;
+  int size = weight_matrix.size();
+  int delta = size / psize;
+  int shift = 0;
+  if (size % psize != 0) {
+    shift = psize * (++delta) - size;
+    M = expandMatrix(M, shift);
+    size = M.size();
+  }
 
-    std::vector<int> dist(size, INF);
-    dist[start] = 0;
-    std::vector<int> was(size, 0);
-    while (!q.empty()) {
-        int current = q.front();
-        q.pop_front();
-        int block = size / pcount;
-        for (int i = 1; i < pcount; i++) {
-            int start = i * block + size % pcount;
-            MPI_Send(&block, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
-            MPI_Send(dist.data() + start, block, MPI_INT, i, 0, MPI_COMM_WORLD);
-            MPI_Send(adjacency_matrix[current].data() + start, block, MPI_INT, i, 0,
-                     MPI_COMM_WORLD);
-            MPI_Send(&dist[current], 1, MPI_INT, i, 0, MPI_COMM_WORLD);
-        }
-        std::vector<int> upd = update(&dist, block + size % pcount,
-                                      adjacency_matrix[current], dist[current]);
-        for (auto v : upd) {
-            v = v + start;
-            if (was[v] == 0) {
-                q.push_back(v);
-                was[v] = 1;
-            } else {
-                q.push_front(v);
+  Vector d(size, INF);
+  d[start] = 0;
+  Vector was(size);
+
+  std::deque<int> Q;
+  Q.push_back(start);
+  while (!Q.empty()) {
+    int curr = Q.front();
+    Q.pop_front();
+    int weight = d[curr];
+    Vector curr_weight_row = M[curr];
+    Vector to_front(size, -1);
+    Vector to_back(size, -1);
+    Vector to_erase(size, -1);
+    for (int i = prank * delta; i < prank * delta + delta; i++) {
+      if (curr_weight_row[i] < INF) {
+        int tmp = d[i];
+        d[i] = std::min(tmp, weight + curr_weight_row[i]);
+        if (d[i] < tmp) {
+          for (auto it = Q.begin(); it != Q.end(); it++) {
+            if (*it == i) {
+              to_erase[i] = i;
+              was[i] = 1;
+              break;
             }
+          }
+          if (was[i]) {
+            to_front[i] = i;
+          } else {
+            to_back[i] = i;
+          }
         }
-        for (int i = 1; i < pcount; i++) {
-            int start = i * block + size % pcount;
-            int resv_size;
-            MPI_Status status;
-            MPI_Recv(&resv_size, 1, MPI_INT, i, 0, MPI_COMM_WORLD, &status);
-            std::vector<int> update(resv_size);
-            if (resv_size != 0)
-                MPI_Recv(update.data(), resv_size, MPI_INT, i, 0, MPI_COMM_WORLD,
-                         &status);
-            MPI_Recv(dist.data() + start, block, MPI_INT, i, 0, MPI_COMM_WORLD,
-                     &status);
-            for (auto v : update) {
-                v = v + start;
-                if (was[v] == 0) {
-                    q.push_back(v);
-                    was[v] = 1;
-                } else {
-                    q.push_front(v);
-                }
-            }
-        }
+      }
     }
 
-    for (int i = 1; i < pcount; i++) {
-        int ext = EXIT_PROCESS;
-        MPI_Send(&ext, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
-    }
+    MPI_Allgather(MPI_IN_PLACE, delta, MPI_INT,
+                  to_front.data(), delta, MPI_INT, MPI_COMM_WORLD);
+    MPI_Allgather(MPI_IN_PLACE, delta, MPI_INT,
+                  to_back.data(), delta, MPI_INT, MPI_COMM_WORLD);
+    MPI_Allgather(MPI_IN_PLACE, delta, MPI_INT,
+                  to_erase.data(), delta, MPI_INT, MPI_COMM_WORLD);
+    MPI_Allgather(MPI_IN_PLACE, delta, MPI_INT, d.data(), delta,
+                  MPI_INT, MPI_COMM_WORLD);
+    MPI_Allgather(MPI_IN_PLACE, delta, MPI_INT, was.data(), delta,
+                  MPI_INT, MPI_COMM_WORLD);
 
-    return dist[end];
+    for (int i = 0; i < size; i++) {
+      if (to_erase[i] > -1) {
+        for (auto it = Q.begin(); it != Q.end(); it++) {
+          if (*it == to_erase[i]) {
+            Q.erase(it);
+            break;
+          }
+        }
+      }
+    }
+    for (int i = 0; i < size; i++) {
+      if (to_front[i] > -1) {
+        Q.push_front(to_front[i]);
+      }
+    }
+    for (int i = 0; i < size; i++) {
+      if (to_back[i] > -1) {
+        Q.push_front(to_back[i]);
+      }
+    }
+  }
+
+  d.erase(d.end() - shift, d.end());
+  return d;
 }
